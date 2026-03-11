@@ -11,3 +11,16 @@ vultc.js
 /vultlib.js
 /vultc_h.h
 /vultc.h
+
+# Session files
+TODO.md
+STRUCTURE.md
+
+# Generated JUCE projects
+CS80Fat/
+*.vst3
+*.component
+*.app
+
+# LSP
+vult-lsp/
