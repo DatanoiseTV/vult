@@ -132,10 +132,10 @@ let get (params : params) (header_code : Pla.t) (impl_code : Pla.t) (tables_code
    ; Pla.string (JuceData.processorImplStr output cc_params num_inputs num_outputs
         module_name process_call input_copies output_copies "" has_ctx),
      FileKind.FullName (output ^ "/Source/PluginProcessor.cpp")
-   ; Pla.string (JuceData.editorHeaderStr output cc_param_names),
-     FileKind.FullName (output ^ "/Source/PluginEditor.h")
-   ; Pla.string (JuceData.editorImplStr output cc_param_names),
-     FileKind.FullName (output ^ "/Source/PluginEditor.cpp")
+   ; Pla.string (JuceData.editorHeaderStr output),
+     FileKind.NoFile
+   ; Pla.string (JuceData.editorImplStr output),
+     FileKind.NoFile
    ; header_pla, FileKind.FullName (output ^ "/" ^ output ^ ".h")
    ; impl_pla, FileKind.FullName (output ^ "/" ^ output ^ ".cpp")
    ; tables_pla, FileKind.FullName (output ^ "/" ^ output ^ ".tables.h")

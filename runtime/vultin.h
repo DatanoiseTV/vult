@@ -43,8 +43,8 @@ NOTE: The code for the fixed-point operations is based on the project:
 
 typedef int32_t fix16_t;
 
-extern float float_samplerate();
-extern fix16_t fix_samplerate();
+extern "C" float float_samplerate();
+extern "C" fix16_t fix_samplerate();
 
 // Type conversion
 static_inline float fix_to_float(fix16_t a) { return (float)a / 0x00010000; }
@@ -82,7 +82,7 @@ static_inline fix16_t fix_sub(fix16_t x, fix16_t y) { return x - y; }
 
 static_inline fix16_t fix_mul(fix16_t x, fix16_t y) {
    int64_t res = (int64_t)x * y;
-   return (fix16_t)(res >> 16);
+   return (fix16_t)((res) >> 16);
 }
 
 static_inline fix16_t fix_div(fix16_t a, fix16_t b) {

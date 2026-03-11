@@ -27,7 +27,8 @@
 
 let q = String.make 1 '"'
 let a s = q ^ s ^ q
-let nl = "\n"
+let nl = "
+"
 let cat = String.concat nl
 
 let make_id (seed:string) (prefix:string) : string =
@@ -99,11 +100,6 @@ let jucerFileStr (output : string) : string =
       ; "      <FILE id=" ^ a f2_id ^ " name=" ^ a "PluginProcessor.h" ^ " compile=" ^ a "0"
         ^ " resource=" ^ a "0"
       ; "            file=" ^ a "Source/PluginProcessor.h" ^ "/>"
-      ; "      <FILE id=" ^ a f3_id ^ " name=" ^ a "PluginEditor.cpp" ^ " compile=" ^ a "1"
-        ^ " resource=" ^ a "0"
-      ; "            file=" ^ a "Source/PluginEditor.cpp" ^ "/>"
-      ; "      <FILE id=" ^ a f4_id ^ " name=" ^ a "PluginEditor.h" ^ " compile=" ^ a "0"
-        ^ " resource=" ^ a "0" ^ " file=" ^ a "Source/PluginEditor.h" ^ "/>"
       ; "      <FILE id=" ^ a f5_id ^ " name=" ^ a (output ^ ".cpp") ^ " compile=" ^ a "1"
         ^ " resource=" ^ a "0" ^ " file=" ^ a (output ^ ".cpp") ^ "/>"
       ; "      <FILE id=" ^ a f6_id ^ " name=" ^ a (output ^ ".h") ^ " compile=" ^ a "0"
@@ -129,7 +125,7 @@ let jucerFileStr (output : string) : string =
       ; "    <MODULE id=" ^ a "juce_graphics" ^ " showAllCode=" ^ a "1" ^ " useLocalCopy=" ^ a "0" ^ " useGlobalPath=" ^ a "0" ^ "/>"
       ; "    <MODULE id=" ^ a "juce_gui_basics" ^ " showAllCode=" ^ a "1" ^ " useLocalCopy=" ^ a "0" ^ " useGlobalPath=" ^ a "0" ^ "/>"
       ; "    <MODULE id=" ^ a "juce_gui_extra" ^ " showAllCode=" ^ a "1" ^ " useLocalCopy=" ^ a "0" ^ " useGlobalPath=" ^ a "0" ^ "/>"
-      ; "  </MODULES>"
+      ; "  </MODULES"
       ; "  <JUCEOPTIONS JUCE_STRICT_REFCOUNTEDPOINTER=" ^ a "1" ^ " JUCE_VST3_CAN_REPLACE_VST2=" ^ a "0" ^ "/>"
       ; "  <EXPORTFORMATS>"
       ; "    <XCODE_MAC targetFolder=" ^ a "Builds/MacOSX" ^ ">"
@@ -284,9 +280,10 @@ let processorHeaderStr (output : string) (cc_params : (int * string) list) (modu
       [ "#pragma once"
       ; ""
       ; "#include <JuceHeader.h>"
+      ; "#include <juce_audio_processors/juce_audio_processors.h>"
       ; "#include " ^ a ("../" ^ output ^ ".h")
       ; ""
-      ; "class " ^ output ^ "AudioProcessor  : public juce::AudioProcessor"
+      ; "class " ^ output ^ "AudioProcessor  : public juce::AudioProcessor, public juce::AudioProcessorValueTreeState::Listener"
       ; "{"
       ; "public:"
       ; "    " ^ output ^ "AudioProcessor();"
@@ -301,8 +298,8 @@ let processorHeaderStr (output : string) (cc_params : (int * string) list) (modu
       ; ""
       ; "    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;"
       ; ""
-      ; "    juce::AudioProcessorEditor* createEditor() override;"
-      ; "    bool hasEditor() const override;"
+      ; "    juce::AudioProcessorEditor* createEditor() override { return nullptr; }"
+      ; "    bool hasEditor() const override { return false; }"
       ; ""
       ; "    const juce::String getName() const override;"
       ; ""
@@ -325,6 +322,10 @@ let processorHeaderStr (output : string) (cc_params : (int * string) list) (modu
       ; ctx_decl
       ; ""
       ; "private:"
+      ; "    juce::AudioProcessorValueTreeState parameters;"
+      ; "public:"
+      ; "    void parameterChanged(const juce::String& parameterID, float newValue) override;"
+      ; "private:"
       ; "    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (" ^ output ^ "AudioProcessor)"
       ; "};"
       ]
@@ -335,7 +336,8 @@ let processorImplStr (output : string) (cc_params : (int * string) list) (num_in
    (module_name : string) (process_call : string) (input_gets : string) (output_sets : string)
    (impl_code_str : string) (has_ctx : bool) : string =
    let cc_init = List.map (fun (_, n) -> "    " ^ n ^ " = 0.0f;") cc_params |> cat in
-   let ctx_init = if has_ctx then "    " ^ module_name ^ "_process_init(process_ctx);\n    " ^ module_name ^ "_default(process_ctx);" else "" in
+   let ctx_init = if has_ctx then "    " ^ module_name ^ "_process_init(process_ctx);
+    " ^ module_name ^ "_default(process_ctx);" else "" in
    let cc_bindings = List.map (fun (cc, n) -> "    " ^ module_name ^ "_controlChange(process_ctx, " ^ string_of_int cc ^ ", " ^ n ^ " * 127.0f, 0);") cc_params |> cat in
    cat
       [ "#include " ^ a "PluginProcessor.h"
@@ -345,7 +347,7 @@ let processorImplStr (output : string) (cc_params : (int * string) list) (num_in
       ; "#include " ^ a ("../" ^ output ^ ".tables.h")
       ; ""
       ; "static double vult_sample_rate = 44100.0;"
-      ; "extern \"C\" {"
+      ; "extern "C" {"
       ; "    float float_samplerate() { return (float)vult_sample_rate; }"
       ; "    int32_t fix_samplerate() { return (int32_t)(vult_sample_rate * 65536.0); }"
       ; "}"
@@ -354,17 +356,23 @@ let processorImplStr (output : string) (cc_params : (int * string) list) (num_in
       ; ""
       ; output ^ "AudioProcessor::" ^ output ^ "AudioProcessor()"
       ; "#ifndef JucePlugin_PreferredChannelConfigurations"
-      ; "     : juce::AudioProcessor (BusesProperties()"
+      ; "     : juce::AudioProcessor (BusesProperties(), &parameters)"
       ; "                     #if ! JucePlugin_IsMidiEffect"
       ; "                      #if ! JucePlugin_IsSynth"
       ; "                       .withInput  (" ^ a "Input" ^ ",  juce::AudioChannelSet::stereo(), true)"
       ; "                      #endif"
       ; "                       .withOutput (" ^ a "Output" ^ ", juce::AudioChannelSet::stereo(), true)"
       ; "                     #endif"
-      ; "                       )"
+      ; "                       ), parameters(*this, nullptr, juce::Identifier("Root"), {})
       ; "#endif"
       ; "{"
       ; ctx_init
+      ; "    juce::AudioProcessorValueTreeState::ParameterLayout layout;"
+      ; "    for (auto const& [cc, name] : cc_params) {"
+      ; "        layout.add(std::make_unique<juce::AudioParameterFloat>(name, name, 0.0f, 1.0f, 0.0f));"
+      ; "    }"
+      ; "    parameters.replaceState(juce::ValueTree("Root"));"
+      ; "    parameters.addParameterListener("all", this);"
       ; cc_init
       ; "}"
       ; ""
@@ -456,142 +464,32 @@ let processorImplStr (output : string) (cc_params : (int * string) list) (num_in
       ; "    }"
       ; "}"
       ; ""
-      ; "bool " ^ output ^ "AudioProcessor::hasEditor() const { return true; }"
-      ; "juce::AudioProcessorEditor* " ^ output ^ "AudioProcessor::createEditor()"
-      ; "{"
-      ; "    return new " ^ output ^ "AudioProcessorEditor (*this);"
+      ; output ^ "AudioProcessor::getStateInformation (juce::MemoryBlock& destData) {"
+      ; "    auto state = parameters.copyState();"
+      ; "    std::unique_ptr<juce::XmlElement> xml (state.createXml());"
+      ; "    copyXmlToBinary (*xml, destData);"
+      ; "}"
+      ; "void " ^ output ^ "AudioProcessor::setStateInformation (const void* data, int sizeInBytes) {"
+      ; "    std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));"
+      ; "    if (xmlState.get() != nullptr) {"
+      ; "        parameters.replaceState (juce::ValueTree::fromXml (*xmlState));"
+      ; "    }"
       ; "}"
       ; ""
-      ; "void " ^ output ^ "AudioProcessor::getStateInformation (juce::MemoryBlock&) {}"
-      ; "void " ^ output ^ "AudioProcessor::setStateInformation (const void*, int) {}"
-      ; ""
-      ; "juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()"
-      ; "{"
+      ; "void " ^ output ^ "AudioProcessor::parameterChanged(const juce::String& parameterID, float newValue) {"
+      ; "    for (auto const& [cc, name] : cc_params) {"
+      ; "        if (parameterID == name) {"
+      ; "            " ^ module_name ^ "_controlChange(process_ctx, cc, (int)(newValue * 127.0f), 0);"
+      ; "        }"
+      ; "    }"
+      ; "}"
+      ; "juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {"
       ; "    return new " ^ output ^ "AudioProcessor();"
       ; "}"
       ]
 ;;
 
 (* --- PluginEditor.h --- *)
-let editorHeaderStr (output : string) (cc_param_names : string list) : string =
-   let sliders = List.map (fun n -> "    juce::Slider " ^ n ^ "_slider;") cc_param_names |> cat in
-   let labels = List.map (fun n -> "    juce::Label " ^ n ^ "_label;") cc_param_names |> cat in
-   cat
-      [ "#pragma once"
-      ; ""
-      ; "#include <JuceHeader.h>"
-      ; "#include " ^ a "PluginProcessor.h"
-      ; ""
-      ; "class " ^ output ^ "AudioProcessorEditor  : public juce::AudioProcessorEditor"
-      ; "{"
-      ; "public:"
-      ; "    " ^ output ^ "AudioProcessorEditor (" ^ output ^ "AudioProcessor&);"
-      ; "    ~" ^ output ^ "AudioProcessorEditor() override;"
-      ; ""
-      ; "    void paint (juce::Graphics&) override;"
-      ; "    void resized() override;"
-      ; ""
-      ; "private:"
-      ; "    " ^ output ^ "AudioProcessor& audioProcessor;"
-      ; ""
-      ; sliders
-      ; labels
-      ; ""
-      ; "    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (" ^ output ^ "AudioProcessorEditor)"
-      ; "};"
-      ]
-;;
-
+let editorHeaderStr (output : string) (_ : string list) : string = ""
 (* --- PluginEditor.cpp --- *)
-let editorImplStr (output : string) (cc_param_names : string list) : string =
-   let num_ctrls = List.length cc_param_names in
-   let slider_inits =
-      List.map (fun n ->
-            cat
-               [ "    " ^ n ^ "_slider.setSliderStyle(juce::Slider::Rotary);"
-               ; "    " ^ n ^ "_slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 80, 20);"
-               ; "    addAndMakeVisible(" ^ n ^ "_slider);"
-               ])
-         cc_param_names
-      |> String.concat "\n"
-   in
-   let label_inits =
-      List.map (fun n ->
-            cat
-               [ "    " ^ n ^ "_label.setText(" ^ a n ^ ", juce::dontSendNotification);"
-               ; "    " ^ n ^ "_label.attachToComponent(&" ^ n ^ "_slider, false);"
-               ; "    addAndMakeVisible(" ^ n ^ "_label);"
-               ])
-         cc_param_names
-      |> String.concat "\n"
-   in
-   let slider_bindings =
-      List.map (fun n ->
-            cat
-               [ "    " ^ n ^ "_slider.onValueChange = [this] {"
-               ; "        audioProcessor." ^ n ^ " = " ^ n ^ "_slider.getValue();"
-               ; "    };"
-               ])
-         cc_param_names
-      |> String.concat "\n"
-   in
-   let slider_init_values =
-      List.map (fun n ->
-            "    " ^ n ^ "_slider.setValue(audioProcessor." ^ n ^ ", juce::dontSendNotification);")
-         cc_param_names
-      |> cat
-   in
-   let layout_code =
-      if num_ctrls = 0
-      then
-         cat
-            [ "    g.setColour (juce::Colours::white);"
-            ; "    g.setFont (juce::FontOptions (15.0f));"
-            ; "    g.drawFittedText (" ^ a output ^ ", getLocalBounds(), juce::Justification::centred, 1);"
-            ]
-      else
-         let rows = max 1 ((num_ctrls + 3) / 4) in
-         let cols = min 4 num_ctrls in
-         let w_cell = 400 / cols in
-         let h_cell = if rows > 0 then 300 / rows else 100 in
-         List.mapi
-            (fun i n ->
-               let col = i mod cols in
-               let row = i / cols in
-               let x = (col * w_cell) + 20 in
-               let y = (row * h_cell) + 30 in
-               let w = w_cell - 40 in
-               let h = h_cell - 50 in
-               "    " ^ n ^ "_slider.setBounds("
-               ^ string_of_int x ^ ", "
-               ^ string_of_int y ^ ", "
-               ^ string_of_int w ^ ", "
-               ^ string_of_int h ^ ");")
-            cc_param_names
-         |> cat
-   in
-   cat
-      [ "#include " ^ a "PluginProcessor.h"
-      ; "#include " ^ a "PluginEditor.h"
-      ; ""
-      ; output ^ "AudioProcessorEditor::" ^ output ^ "AudioProcessorEditor (" ^ output ^ "AudioProcessor& p)"
-      ; "    : juce::AudioProcessorEditor (&p), audioProcessor (p)"
-      ; "{"
-      ; "    setSize (400, " ^ string_of_int (max 300 (((num_ctrls + 3) / 4) * 100 + 40)) ^ ");"
-      ; slider_inits
-      ; label_inits
-      ; slider_bindings
-      ; slider_init_values
-      ; "}"
-      ; ""
-      ; output ^ "AudioProcessorEditor::~" ^ output ^ "AudioProcessorEditor() {}"
-      ; ""
-      ; "void " ^ output ^ "AudioProcessorEditor::paint (juce::Graphics& g)"
-      ; "{"
-      ; "    g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));"
-      ; layout_code
-      ; "}"
-      ; ""
-      ; "void " ^ output ^ "AudioProcessorEditor::resized() {}"
-      ]
-;;
+let editorImplStr (output : string) (_ : string list) : string = ""
