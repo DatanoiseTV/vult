@@ -3,9 +3,12 @@
 <src> : include
 <src/*> : include
 <src/generators/*> : include
+<src/generators/templates/*> : include
 
 # Link libraries and ppx common for all targets
 <**/*.ml> : package(containers), package(pla), package(ppx_deriving), package(ppx_deriving.std), package(pla.ppx), package(result)
+# juceData.ml has no pla templates
+<src/generators/templates/juceData.ml> : -package(pla.ppx)
 <**/*.byte> or <**/*.d.byte> or <**/*.native> : package(containers), package(pla), package(ppx_deriving), package(result)
 
 # Link libraries for the Test executable

@@ -96,6 +96,9 @@ let showResult (args : args) (output : output) =
       List.iter
          (fun (text, file) ->
              let filename = getFile args file in
+             let dir = Filename.dirname filename in
+             if dir <> "." && dir <> "" && not (Sys.file_exists dir)
+             then ignore (Sys.command ("mkdir -p " ^ Filename.quote dir));
              let code = Pla.print text in
              if args.force_write
              then FileIO.write filename code |> ignore

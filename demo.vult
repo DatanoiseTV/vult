@@ -1,0 +1,348 @@
+// =============================================================================
+// VULT CS-80 "FAT EDITION" - V16 (STEREO ARCHITECTURE)
+// Full stereo signal path, stereo chorus, and stereo shimmer reverb.
+// =============================================================================
+
+// --- 1. UTILITIES & MATH ---
+
+fun pitchToRate(pitch: real) : real @[table(size=127,min=0.0,max=127.0)] {
+    return 8.1757989156 * exp(0.05776226505 * pitch) / 44100.0;
+}
+
+fun polyblep(phase: real, inc: real) : real {
+    val t = phase / inc;
+    if (t < 1.0) { return t + t - t * t - 1.0; } 
+    else if (t > (1.0 / inc) - 1.0) {
+        val t2 = (t - (1.0 / inc));
+        return t2 * t2 + t2 + t2 + 1.0;
+    }
+    return 0.0;
+}
+
+fun wrap_idx(idx_raw: int, size: int) : int {
+    val out = idx_raw % size;
+    if (out < 0) { out = out + size; }
+    return out;
+}
+
+fun lerp(a: real, b: real, t: real) : real {
+    return a + (b - a) * t;
+}
+
+// --- 2. CORE COMPONENTS ---
+
+fun cs80_vibrato(rate: real, depth: real) : real {
+    mem phase: real;
+    val inc = (0.5 + rate * 10.0) / 44100.0;
+    phase = phase + inc;
+    if (phase >= 1.0) { phase = phase - 1.0; }
+    return sin(phase * 6.2831853) * depth * 0.5;
+}
+
+fun cs80_vco(cv: real, pwm_base: real, pwm_mod: real) : real {
+    mem phase: real;
+    val inc = pitchToRate(clip(cv, 0.0, 127.0));
+    phase = phase + inc;
+    if (phase >= 1.0) { phase = phase - 1.0; }
+    val saw = (1.0 - 2.0 * phase) + polyblep(phase, inc);
+    val pw = clip(pwm_base + pwm_mod, 0.1, 0.9);
+    val p2 = phase + 1.0 - pw;
+    val p2_wrapped = if p2 >= 1.0 then p2 - 1.0 else p2;
+    val naive_sq = if phase < pw then 1.0 else -1.0;
+    val sqr = naive_sq + polyblep(phase, inc) - polyblep(p2_wrapped, inc);
+    return (saw + sqr) * 0.5;
+}
+
+fun cs80_sub_osc(cv: real) : real {
+    mem phase: real;
+    val inc = pitchToRate(clip(cv - 12.0, 0.0, 127.0));
+    phase = phase + inc;
+    if (phase >= 1.0) { phase = phase - 1.0; }
+    val pw = 0.5;
+    val p2 = phase + 1.0 - pw;
+    val p2_wrapped = if p2 >= 1.0 then p2 - 1.0 else p2;
+    val naive_sq = if phase < pw then 1.0 else -1.0;
+    val sqr = naive_sq + polyblep(phase, inc) - polyblep(p2_wrapped, inc);
+    val tri = if phase < 0.5 then 4.0 * phase - 1.0 else 3.0 - 4.0 * phase;
+    return sqr * 0.6 + tri * 0.4;
+}
+
+fun cs80_pitch_eg(gate: bool, start_pitch: real, time: real) : real {
+    mem env: real;
+    mem prev_gate: bool;
+    val rate = 1.0 / (0.001 + time * 1.0 * 44100.0);
+    if (gate == true) {
+        if (prev_gate == false) { env = start_pitch; }
+        env = env + (0.0 - env) * rate;
+    } else {
+        env = 0.0;
+    }
+    prev_gate = gate;
+    return env;
+}
+
+fun cs80_filter(in_sig: real, cv: real, res: real, is_hp: bool) : real {
+    mem ic1eq: real; mem ic2eq: real;
+    val g = clip(pitchToRate(cv) * 3.14159 * 2.0, 0.001, 0.9);
+    val k = 2.0 - (clip(res, 0.0, 1.0) * 1.9);
+    val a1 = 1.0 / (1.0 + g * (g + k));
+    val a2 = g * a1;
+    val a3 = g * a2;
+    val v3 = in_sig - ic2eq;
+    val v1 = a1 * ic1eq + a2 * v3;
+    val v2 = ic2eq + a2 * ic1eq + a3 * v3;
+    ic1eq = 2.0 * v1 - ic1eq;
+    ic2eq = 2.0 * v2 - ic2eq;
+    val out = if is_hp == true then in_sig - k * v1 - v2 else v2;
+    return out;
+}
+
+fun adsr(gate: bool, a: real, d: real, s: real, r: real) : real {
+    mem state: int; mem v: real; mem prev_gate: bool;
+    val a_r = 1.0 / (0.001 + a * 2.0 * 44100.0);
+    val d_r = 1.0 / (0.01 + d * 4.0 * 44100.0);
+    val r_r = 1.0 / (0.01 + r * 5.0 * 44100.0);
+    if (gate == true) {
+        if (prev_gate == false) { state = 1; v = 0.0; }
+        if (state == 1) { v = v + a_r; if (v >= 1.0) { v = 1.0; state = 2; } }
+        else if (state == 2) { v = v + (s - v) * d_r; }
+    } else {
+        state = 0;
+        v = v + (0.0 - v) * r_r;
+    }
+    prev_gate = gate;
+    return v;
+}
+
+// --- 3. EFFECTS ---
+
+fun roland_chorus(inL: real, inR: real, depth: real) {
+    mem b1: array(real, 1024); mem b2: array(real, 1024);
+    mem pos: int; mem lfo: real;
+    pos = (pos + 1) % 1024;
+    b1[pos] = inL;
+    b2[pos] = inR;
+    lfo = lfo + (0.6 / 44100.0);
+    if (lfo >= 1.0) { lfo = 0.0; }
+    val tri = if lfo < 0.5 then lfo * 4.0 - 1.0 else 3.0 - lfo * 4.0;
+    val mod_depth = depth * 150.0;
+    val offset1 = 660.0 + (tri * mod_depth);
+    val offset2 = 660.0 - (tri * mod_depth);
+    
+    val i1 = int(offset1); val f1 = offset1 - real(i1);
+    val t1 = lerp(b1[wrap_idx(pos - i1, 1024)], b1[wrap_idx(pos - i1 - 1, 1024)], f1);
+    
+    val i2 = int(offset2); val f2 = offset2 - real(i2);
+    val t2 = lerp(b2[wrap_idx(pos - i2, 1024)], b2[wrap_idx(pos - i2 - 1, 1024)], f2);
+    
+    return inL * 0.5 + t1 * 0.5, inR * 0.5 + t2 * 0.5;
+}
+
+fun pitch_shifter(in_sig: real) : real {
+    mem buffer: array(real, 2048);
+    mem write_ptr: int;
+    mem phase: real;
+    
+    write_ptr = (write_ptr + 1) % 2048;
+    buffer[write_ptr] = in_sig;
+    
+    phase = phase + (1.0 / 2048.0); 
+    if (phase >= 1.0) { phase = phase - 1.0; }
+    
+    val mod1 = (1.0 - phase) * 2048.0;
+    val phase2 = if phase + 0.5 >= 1.0 then phase - 0.5 else phase + 0.5;
+    val mod2 = (1.0 - phase2) * 2048.0;
+    
+    val i1 = int(mod1); val f1 = mod1 - real(i1);
+    val tap1 = lerp(buffer[wrap_idx(write_ptr - i1, 2048)], buffer[wrap_idx(write_ptr - i1 - 1, 2048)], f1);
+    
+    val i2 = int(mod2); val f2 = mod2 - real(i2);
+    val tap2 = lerp(buffer[wrap_idx(write_ptr - i2, 2048)], buffer[wrap_idx(write_ptr - i2 - 1, 2048)], f2);
+    
+    val fade = if phase < 0.5 then phase * 2.0 else 2.0 - phase * 2.0;
+    return tap1 * fade + tap2 * (1.0 - fade);
+}
+
+fun shimmer_reverb(inL: real, inR: real, mix: real, decay: real, shimmer: real, lush: real, damp: real) {
+    mem d1: array(real, 1031); mem d2: array(real, 1381);
+    mem d3: array(real, 1619); mem d4: array(real, 1979);
+    mem p1: int; mem p2: int; mem p3: int; mem p4: int;
+    mem s1: real; mem s2: real; mem s3: real; mem s4: real;
+    mem lpL: real; mem lpR: real; mem dcL: real; mem dcR: real; mem lfo: real;
+
+    p1 = (p1 + 1) % 1031; p2 = (p2 + 1) % 1381;
+    p3 = (p3 + 1) % 1619; p4 = (p4 + 1) % 1979;
+
+    lfo = lfo + (0.15 / 44100.0);
+    if (lfo >= 1.0) { lfo = 0.0; }
+    val mod = sin(lfo * 6.2831853) * lush * 12.0;
+
+    // Hadamard Matrix for Stereo Diffusion
+    val f1 = 0.5 * (s1 + s2 + s3 + s4);
+    val f2 = 0.5 * (s1 - s2 + s3 - s4);
+    val f3 = 0.5 * (s1 + s2 - s3 - s4);
+    val f4 = 0.5 * (s1 - s2 - s3 + s4);
+
+    // Shimmer (L+R sum for shimmer input)
+    val shim_in = tanh((f1 + f2 + f3 + f4) * 0.25);
+    val shim_sig = pitch_shifter(shim_in) * shimmer * 1.2;
+    
+    // Damping & DC Block
+    lpL = lpL + (shim_sig - lpL) * (1.0 - damp * 0.9);
+    lpR = lpR + (shim_sig - lpR) * (1.0 - damp * 0.9);
+    dcL = dcL + (f1 - dcL) * 0.001;
+    dcR = dcR + (f2 - dcR) * 0.001;
+
+    val fb = decay * 0.85;
+    
+    // Inject stereo input + shimmer + feedback
+    d1[p1] = inL + tanh((f1 - dcL) * fb + lpL * 0.5);
+    d2[p2] = inR + tanh((f2 - dcR) * fb + lpR * 0.5);
+    d3[p3] = inL + tanh((f3 - dcL) * fb);
+    d4[p4] = inR + tanh((f4 - dcR) * fb);
+
+    // Linear Interpolated Reads
+    val i1 = int(10.0 + mod); val fr1 = (10.0 + mod) - real(i1);
+    s1 = lerp(d1[wrap_idx(p1 - i1, 1031)], d1[wrap_idx(p1 - i1 - 1, 1031)], fr1);
+    
+    val i2 = int(10.0 + mod); val fr2 = (10.0 + mod) - real(i2);
+    s2 = lerp(d2[wrap_idx(p2 - i2, 1381)], d2[wrap_idx(p2 - i2 - 1, 1381)], fr2);
+    
+    val i3 = int(10.0 + mod); val fr3 = (10.0 + mod) - real(i3);
+    s3 = lerp(d3[wrap_idx(p3 - i3, 1619)], d3[wrap_idx(p3 - i3 - 1, 1619)], fr3);
+    
+    val i4 = int(10.0 + mod); val fr4 = (10.0 + mod) - real(i4);
+    s4 = lerp(d4[wrap_idx(p4 - i4, 1979)], d4[wrap_idx(p4 - i4 - 1, 1979)], fr4);
+
+    val wetL = (s1 + s3) * 0.5;
+    val wetR = (s2 + s4) * 0.5;
+    return inL + wetL * mix, inR + wetR * mix;
+}
+
+// --- 4. VOICE ARCHITECTURE ---
+
+fun cs80_voice(
+    gate: bool, note: real, pb: real, vib: real,
+    pwm_amt: real, sub_amt: real, detune: real, drive: real,
+    hp_c: real, lp_c: real, res: real,
+    eg_a: real, eg_d: real, eg_s: real, eg_r: real,
+    p_start: real, p_time: real
+) : real {
+    val amp_env = adsr(gate, eg_a, eg_d, eg_s, eg_r);
+    val pit_env = cs80_pitch_eg(gate, p_start, p_time);
+    val pitch = note + pb + vib + pit_env;
+    
+    // Dual VCO with Detune
+    val osc1 = cs80_vco(pitch, 0.5, vib * pwm_amt);
+    val osc2 = cs80_vco(pitch + detune * 0.5, 0.5, vib * pwm_amt);
+    val sub = cs80_sub_osc(pitch);
+    
+    // Mix and Saturate
+    val mixed = (osc1 + osc2) * 0.5 + sub * sub_amt;
+    val driven = tanh(mixed * (1.0 + drive * 4.0));
+    
+    val hpf = cs80_filter(driven, hp_c, 0.1, true);
+    val lpf = cs80_filter(hpf, lp_c + (amp_env * 70.0), res, false);
+    
+    return tanh(lpf * amp_env);
+}
+
+// --- 5. HOST INTERFACE ---
+
+fun low_shelf(inL: real, inR: real, freq: real, gain: real) {
+    mem lpL: real; mem lpR: real;
+    val alpha = pitchToRate(freq) * 3.14159 * 2.0;
+    lpL = lpL + (inL - lpL) * alpha;
+    lpR = lpR + (inR - lpR) * alpha;
+    return inL + lpL * gain, inR + lpR * gain;
+}
+
+fun process(input: real) {
+    mem n1: real; mem n2: real; mem n3: real; mem n4: real; mem n5: real; mem n6: real;
+    mem g1: bool; mem g2: bool; mem g3: bool; mem g4: bool; mem g5: bool; mem g6: bool;
+    mem pb: real; mem vib_rate: real; mem vib_depth: real; mem pwm_amt: real; mem sub_amt: real;
+    mem detune: real; mem drive: real;
+    mem hp_c: real; mem lp_c: real; mem res: real; mem eg_a: real; mem eg_d: real; mem eg_s: real; mem eg_r: real;
+    mem p_start: real; mem p_time: real; mem chorus_depth: real; mem vol: real;
+    mem rev_mix: real; mem rev_decay: real; mem rev_shimmer: real; mem rev_lush: real; mem rev_damp: real;
+    mem voice_ptr: int;
+
+    val vib = cs80_vibrato(vib_rate, vib_depth);
+
+    val o1 = cs80_voice(g1, n1, pb, vib, pwm_amt, sub_amt, detune, drive, hp_c, lp_c, res, eg_a, eg_d, eg_s, eg_r, p_start, p_time);
+    val o2 = cs80_voice(g2, n2, pb, vib, pwm_amt, sub_amt, detune, drive, hp_c, lp_c, res, eg_a, eg_d, eg_s, eg_r, p_start, p_time);
+    val o3 = cs80_voice(g3, n3, pb, vib, pwm_amt, sub_amt, detune, drive, hp_c, lp_c, res, eg_a, eg_d, eg_s, eg_r, p_start, p_time);
+    val o4 = cs80_voice(g4, n4, pb, vib, pwm_amt, sub_amt, detune, drive, hp_c, lp_c, res, eg_a, eg_d, eg_s, eg_r, p_start, p_time);
+    val o5 = cs80_voice(g5, n5, pb, vib, pwm_amt, sub_amt, detune, drive, hp_c, lp_c, res, eg_a, eg_d, eg_s, eg_r, p_start, p_time);
+    val o6 = cs80_voice(g6, n6, pb, vib, pwm_amt, sub_amt, detune, drive, hp_c, lp_c, res, eg_a, eg_d, eg_s, eg_r, p_start, p_time);
+    
+    // Stereo Panning for voices
+    val mixL = (o1 + o3 + o5) * 0.25 + (o2 + o4 + o6) * 0.1;
+    val mixR = (o2 + o4 + o6) * 0.25 + (o1 + o3 + o5) * 0.1;
+    
+    val cL, cR = roland_chorus(mixL, mixR, chorus_depth);
+    val rL, rR = shimmer_reverb(cL, cR, rev_mix, rev_decay, rev_shimmer, rev_lush, rev_damp);
+    
+    val outL, outR = low_shelf(rL, rR, 30.0, 0.5);
+    
+    return outL * vol, outR * vol;
+}
+
+and noteOn(n: int, v: int, ch: int) {
+    val rn = real(n);
+    voice_ptr = (voice_ptr + 1) % 6;
+    if (voice_ptr == 0) { n1 = rn; g1 = true; }
+    else if (voice_ptr == 1) { n2 = rn; g2 = true; }
+    else if (voice_ptr == 2) { n3 = rn; g3 = true; }
+    else if (voice_ptr == 3) { n4 = rn; g4 = true; }
+    else if (voice_ptr == 4) { n5 = rn; g5 = true; }
+    else if (voice_ptr == 5) { n6 = rn; g6 = true; }
+}
+
+and noteOff(n: int, ch: int) {
+    val rn = real(n);
+    if (n1 == rn) { g1 = false; } 
+    if (n2 == rn) { g2 = false; }
+    if (n3 == rn) { g3 = false; }
+    if (n4 == rn) { g4 = false; }
+    if (n5 == rn) { g5 = false; }
+    if (n6 == rn) { g6 = false; }
+}
+
+and controlChange(c: int, v: int, ch: int) {
+    val vn = real(v) / 127.0;
+    if (c == 30) { vib_rate = vn; }
+    else if (c == 31) { vib_depth = vn; }
+    else if (c == 32) { pwm_amt = vn; }
+    else if (c == 38) { sub_amt = vn; }
+    else if (c == 39) { detune = vn; }
+    else if (c == 40) { drive = vn; }
+    else if (c == 74) { lp_c = vn * 100.0; }
+    else if (c == 71) { res = vn; }
+    else if (c == 76) { hp_c = vn * 100.0; }
+    else if (c == 73) { eg_a = vn; }
+    else if (c == 75) { eg_d = vn; }
+    else if (c == 79) { eg_s = vn; }
+    else if (c == 72) { eg_r = vn; }
+    else if (c == 80) { p_start = (vn - 0.5) * 12.0; }
+    else if (c == 81) { p_time = vn; }
+    else if (c == 82) { chorus_depth = vn; }
+    else if (c == 33) { rev_mix = vn; }
+    else if (c == 34) { rev_decay = vn; }
+    else if (c == 35) { rev_shimmer = vn; }
+    else if (c == 36) { rev_lush = vn; }
+    else if (c == 37) { rev_damp = vn; }
+    else if (c == 41) { vol = vn; }
+}
+
+and default() {
+    vib_rate = 0.4; vib_depth = 0.1; pwm_amt = 0.2; sub_amt = 0.5;
+    detune = 0.15; drive = 0.3;
+    lp_c = 40.0; hp_c = 20.0; res = 0.5;
+    eg_a = 0.01; eg_d = 0.2; eg_s = 0.4; eg_r = 0.2;
+    p_start = 0.5; p_time = 0.05; 
+    chorus_depth = 0.7; vol = 0.8;
+    rev_mix = 0.4; rev_decay = 0.8; rev_shimmer = 0.5; rev_lush = 0.5; rev_damp = 0.3;
+    voice_ptr = 0;
+}
+
