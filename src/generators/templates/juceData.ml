@@ -255,7 +255,8 @@ let jucerPluginDefinesStr (output : string) : string =
 
 (* --- PluginProcessor.h --- *)
 let processorHeaderStr (output : string) (_cc_params : (int * string) list) (module_name : string) (has_ctx : bool) : string =
-   let ctx_decl = if has_ctx then "    " ^ module_name ^ "_process_type process_ctx;" else "" in
+   (* Use {} to value-initialize the context struct to zero *)
+   let ctx_decl = if has_ctx then "    " ^ module_name ^ "_process_type process_ctx{};" else "" in
    cat
       [ "#pragma once"
       ; ""
@@ -294,9 +295,11 @@ let processorHeaderStr (output : string) (_cc_params : (int * string) list) (mod
       ; "    void getStateInformation (juce::MemoryBlock& destData) override;"
       ; "    void setStateInformation (const void* data, int sizeInBytes) override;"
       ; ""
-      ; ctx_decl
-      ; ""
       ; "private:"
+      ; "    void initDsp();"
+      ; ctx_decl
+      ; "    bool dspInitialized = false;"
+      ; ""
       ; "    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (" ^ output ^ "AudioProcessor)"
       ; "};"
       ]
@@ -306,9 +309,24 @@ let processorHeaderStr (output : string) (_cc_params : (int * string) list) (mod
 let processorImplStr (output : string) (_cc_params : (int * string) list) (num_inputs : int) (num_outputs : int)
    (module_name : string) (process_call : string) (_input_gets : string) (_output_sets : string)
    (_impl_code_str : string) (has_ctx : bool) : string =
-   let ctx_init = if has_ctx then 
-      "    " ^ module_name ^ "_process_init(process_ctx);\n    " ^ module_name ^ "_default(process_ctx);" 
-   else "" in
+   (* DSP init helper function - called from prepareToPlay *)
+   let init_dsp_func = if has_ctx then
+      cat [
+         "void " ^ output ^ "AudioProcessor::initDsp()"
+         ; "{"
+         ; "    " ^ module_name ^ "_process_init(process_ctx);"
+         ; "    " ^ module_name ^ "_default(process_ctx);"
+         ; "    dspInitialized = true;"
+         ; "}"
+      ]
+   else
+      cat [
+         "void " ^ output ^ "AudioProcessor::initDsp()"
+         ; "{"
+         ; "    dspInitialized = true;"
+         ; "}"
+      ]
+   in
    let midi_handler = if has_ctx then
       cat [
          "    // Process MIDI messages"
@@ -372,12 +390,14 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       ; "    int32_t fix_samplerate() { return (int32_t)(vult_sample_rate * 65536.0); }"
       ; "}"
       ; ""
+      ; init_dsp_func
+      ; ""
       ; output ^ "AudioProcessor::" ^ output ^ "AudioProcessor()"
       ; "    : juce::AudioProcessor (BusesProperties()"
       ; "                            .withInput  (" ^ a "Input" ^ ",  juce::AudioChannelSet::stereo(), true)"
       ; "                            .withOutput (" ^ a "Output" ^ ", juce::AudioChannelSet::stereo(), true))"
       ; "{"
-      ; ctx_init
+      ; "    // DSP initialized in prepareToPlay when sample rate is known"
       ; "}"
       ; ""
       ; output ^ "AudioProcessor::~" ^ output ^ "AudioProcessor() {}"
@@ -396,7 +416,7 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       ; "void " ^ output ^ "AudioProcessor::prepareToPlay (double sampleRate, int)"
       ; "{"
       ; "    vult_sample_rate = sampleRate;"
-      ; ctx_init
+      ; "    initDsp();"
       ; "}"
       ; ""
       ; "void " ^ output ^ "AudioProcessor::releaseResources() {}"
@@ -412,6 +432,14 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       ; "void " ^ output ^ "AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)"
       ; "{"
       ; "    juce::ScopedNoDenormals noDenormals;"
+      ; ""
+      ; "    // Ensure DSP is initialized before processing"
+      ; "    if (!dspInitialized)"
+      ; "    {"
+      ; "        buffer.clear();"
+      ; "        return;"
+      ; "    }"
+      ; ""
       ; "    auto totalNumInputChannels  = getTotalNumInputChannels();"
       ; "    auto totalNumOutputChannels = getTotalNumOutputChannels();"
       ; ""
