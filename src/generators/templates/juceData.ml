@@ -428,8 +428,9 @@ let processorImplStr (output : string) (cc_params : (int * string) list) (num_in
          ; "    for (int j = 0; j < buffer.getNumSamples(); j++)"
          ; "    {"
          ; "        " ^ process_call
-         ; "        leftChannel[j] = " ^ module_name ^ "_process_ret_0(process_ctx);"
-         ; "        rightChannel[j] = " ^ module_name ^ "_process_ret_1(process_ctx);"
+         ; "        // Hard clip output to prevent damage to speakers/ears"
+         ; "        leftChannel[j] = juce::jlimit(-1.0f, 1.0f, " ^ module_name ^ "_process_ret_0(process_ctx));"
+         ; "        rightChannel[j] = juce::jlimit(-1.0f, 1.0f, " ^ module_name ^ "_process_ret_1(process_ctx));"
          ; "    }"
       ]
    else
@@ -439,7 +440,8 @@ let processorImplStr (output : string) (cc_params : (int * string) list) (num_in
          ; ""
          ; "    for (int j = 0; j < buffer.getNumSamples(); j++)"
          ; "    {"
-         ; "        outChannel[j] = " ^ process_call
+         ; "        // Hard clip output to prevent damage to speakers/ears"
+         ; "        outChannel[j] = juce::jlimit(-1.0f, 1.0f, " ^ process_call ^ ");"
          ; "    }"
       ]
    in
