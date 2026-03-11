@@ -190,7 +190,89 @@ module Configuration = struct
          | Some cc -> cc :: from_then @ from_else
          | None -> from_then @ from_else)
       | StmtBlock (_, stmts, _) -> List.concat_map extractCCParams stmts
+      (* Skip over val/mem declarations when searching for if statements *)
+      | StmtVal _ | StmtMem _ -> []
       | _ -> []
+   ;;
+
+   (** After passes, the AST is transformed so conditions are extracted to temp vars:
+       val (_cond_N:bool) = (c == CC_NUM);
+       if(_cond_N) (_ctx.param:real) = vn;
+       
+       This function extracts CC params from the transformed AST by:
+       1. Building a map of condition var -> CC number from StmtBind patterns
+       2. Then matching if(cond_var) to find the param name *)
+   
+   (* Extract CC number from a binding like: (_cond_97:bool) = (c == 30) *)
+   let extractCCFromBind (stmt : stmt) : (string * int) option =
+      match stmt with
+      | StmtBind (LId (cond_id, _, _), POp ("==", [ PId (_, _); PInt (cc_num, _) ], _), _)
+      | StmtBind (LId (cond_id, _, _), POp ("==", [ PInt (cc_num, _); PId (_, _) ], _), _) ->
+         (match getLastName cond_id with
+          | Some name -> Some (name, cc_num)
+          | None -> None)
+      | _ -> None
+   ;;
+
+   (* Extract param name from if body - handles (_ctx.param:type) = expr *)
+   let extractParamFromBody (body : stmt) : string option =
+      match body with
+      | StmtBind (LId (id, _, _), _, _) -> 
+         (* Handle _ctx.param style names - get the last part *)
+         getLastName id
+      | StmtBlock (_, [ StmtBind (LId (id, _, _), _, _) ], _) ->
+         getLastName id
+      | _ -> None
+   ;;
+
+   (* Match if(cond_var) body and look up cond_var in the map *)
+   let extractCCFromTransformedIf (cond_map : (string, int) Hashtbl.t) (stmt : stmt) : Config.cc_param option =
+      match stmt with
+      | StmtIf (PId (cond_id, _), body, _, _) ->
+         (match getLastName cond_id with
+          | Some cond_name ->
+             (match Hashtbl.find_opt cond_map cond_name with
+              | Some cc_num ->
+                 (match extractParamFromBody body with
+                  | Some param_name -> Some { Config.cc_number = cc_num; param_name }
+                  | None -> None)
+              | None -> None)
+          | None -> None)
+      | _ -> None
+   ;;
+
+   (** Extract CC params from transformed AST *)
+   let extractCCParamsFromTransformed (body : stmt) : Config.cc_param list =
+      (* First pass: collect all condition var -> CC number mappings *)
+      let cond_map = Hashtbl.create 32 in
+      let rec collectConditions stmt =
+         match stmt with
+         | StmtBind _ ->
+            (match extractCCFromBind stmt with
+             | Some (name, cc) -> Hashtbl.replace cond_map name cc
+             | None -> ())
+         | StmtBlock (_, stmts, _) -> List.iter collectConditions stmts
+         | StmtIf (_, then_body, else_body, _) ->
+            collectConditions then_body;
+            (match else_body with Some s -> collectConditions s | None -> ())
+         | _ -> ()
+      in
+      collectConditions body;
+      
+      (* Second pass: extract CC params from if statements *)
+      let rec extractFromIfs stmt =
+         match stmt with
+         | StmtIf (_, then_body, else_body, _) ->
+            let from_if = extractCCFromTransformedIf cond_map stmt in
+            let from_then = extractFromIfs then_body in
+            let from_else = match else_body with Some s -> extractFromIfs s | None -> [] in
+            (match from_if with
+             | Some cc -> cc :: from_then @ from_else
+             | None -> from_then @ from_else)
+         | StmtBlock (_, stmts, _) -> List.concat_map extractFromIfs stmts
+         | _ -> []
+      in
+      extractFromIfs body
    ;;
 
    (** This traverser checks the function declarations of the key functions to generate templates *)
@@ -217,7 +299,10 @@ module Configuration = struct
       | StmtFun ([ cname; "controlChange" ], args, body, _, attr) when conf.module_name = cname ->
          let controlchange_inputs, _ = List.map (getType repl) args |> passData in
          let () = checkControlChange attr.loc controlchange_inputs in
-         let cc_params = extractCCParams body in
+         (* AST is transformed by passes - conditions are extracted to temp vars.
+            Use extractCCParamsFromTransformed which handles the transformed pattern:
+            val (_cond_N:bool) = (c == CC_NUM); if(_cond_N) (_ctx.param) = vn; *)
+         let cc_params = extractCCParamsFromTransformed body in
          let state' = Env.set state ({ conf with controlchange_inputs; cc_params }, repl) in
          state', stmt
       | StmtFun ([ cname; "default" ], args, _, _, attr) when conf.module_name = cname ->

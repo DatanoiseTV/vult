@@ -254,9 +254,17 @@ let jucerPluginDefinesStr (output : string) : string =
 ;;
 
 (* --- PluginProcessor.h --- *)
-let processorHeaderStr (output : string) (_cc_params : (int * string) list) (module_name : string) (has_ctx : bool) : string =
+let processorHeaderStr (output : string) (cc_params : (int * string) list) (module_name : string) (has_ctx : bool) : string =
    (* Use {} to value-initialize the context struct to zero *)
    let ctx_decl = if has_ctx then "    " ^ module_name ^ "_process_type process_ctx{};" else "" in
+   (* Generate APVTS if we have CC params *)
+   let has_params = List.length cc_params > 0 in
+   let apvts_decl = if has_params then
+      cat [
+         "    juce::AudioProcessorValueTreeState parameters;"
+         ; "    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();"
+      ]
+   else "" in
    cat
       [ "#pragma once"
       ; ""
@@ -297,8 +305,10 @@ let processorHeaderStr (output : string) (_cc_params : (int * string) list) (mod
       ; ""
       ; "private:"
       ; "    void initDsp();"
+      ; "    void prewarmDsp(int numSamples);"
       ; ctx_decl
       ; "    bool dspInitialized = false;"
+      ; apvts_decl
       ; ""
       ; "    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (" ^ output ^ "AudioProcessor)"
       ; "};"
@@ -306,12 +316,42 @@ let processorHeaderStr (output : string) (_cc_params : (int * string) list) (mod
 ;;
 
 (* --- PluginProcessor.cpp --- *)
-let processorImplStr (output : string) (_cc_params : (int * string) list) (num_inputs : int) (num_outputs : int)
+let processorImplStr (output : string) (cc_params : (int * string) list) (num_inputs : int) (num_outputs : int)
    (module_name : string) (process_call : string) (_input_gets : string) (_output_sets : string)
    (_impl_code_str : string) (has_ctx : bool) : string =
+   let has_params = List.length cc_params > 0 in
+   
+   (* Generate parameter layout function if we have CC params *)
+   let param_layout_func = if has_params then
+      let param_adds = List.map (fun (cc, name) ->
+         "        layout.add(std::make_unique<juce::AudioParameterFloat>(" ^
+         a ("cc" ^ string_of_int cc) ^ ", " ^ a name ^ ", 0.0f, 1.0f, 0.5f));"
+      ) cc_params |> cat in
+      cat [
+         "juce::AudioProcessorValueTreeState::ParameterLayout " ^ output ^ "AudioProcessor::createParameterLayout()"
+         ; "{"
+         ; "    juce::AudioProcessorValueTreeState::ParameterLayout layout;"
+         ; param_adds
+         ; "    return layout;"
+         ; "}"
+      ]
+   else ""
+   in
+   
+   (* Generate parameter sync code - read APVTS params and send as CC *)
+   let param_sync = if has_params && has_ctx then
+      let sync_lines = List.map (fun (cc, _name) ->
+         "        { float v = *parameters.getRawParameterValue(" ^ a ("cc" ^ string_of_int cc) ^ "); " ^
+         module_name ^ "_controlChange(process_ctx, " ^ string_of_int cc ^ ", (int)(v * 127.0f), 0); }"
+      ) cc_params |> cat in
+      cat [
+         "    // Sync APVTS parameters to DSP via controlChange"
+         ; sync_lines
+      ]
+   else ""
+   in
+   
    (* DSP init helper function - called from prepareToPlay *)
-   (* IMPORTANT: memset to zero first because Vult-generated init functions
-      don't initialize delay line arrays, leaving garbage in memory *)
    let init_dsp_func = if has_ctx then
       cat [
          "void " ^ output ^ "AudioProcessor::initDsp()"
@@ -319,23 +359,40 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
          ; "    DBG(\"[VULT] initDsp called, sample rate = \" << vult_sample_rate);"
          ; "    // Zero the entire context first - Vult init doesn't clear delay buffers"
          ; "    std::memset(&process_ctx, 0, sizeof(process_ctx));"
-         ; "    DBG(\"[VULT] memset done, ctx size = \" << sizeof(process_ctx));"
          ; "    " ^ module_name ^ "_process_init(process_ctx);"
-         ; "    DBG(\"[VULT] process_init done\");"
          ; "    " ^ module_name ^ "_default(process_ctx);"
-         ; "    DBG(\"[VULT] default done, vol = \" << process_ctx.vol);"
+         ; "    // Prewarm DSP to stabilize filters"
+         ; "    prewarmDsp(256);"
          ; "    dspInitialized = true;"
+         ; "    DBG(\"[VULT] initDsp complete\");"
          ; "}"
       ]
    else
       cat [
          "void " ^ output ^ "AudioProcessor::initDsp()"
          ; "{"
-         ; "    DBG(\"[VULT] initDsp called (no ctx)\");"
          ; "    dspInitialized = true;"
          ; "}"
       ]
    in
+   
+   (* Prewarm function - run DSP with silence to stabilize filters *)
+   let prewarm_func = if has_ctx then
+      cat [
+         "void " ^ output ^ "AudioProcessor::prewarmDsp(int numSamples)"
+         ; "{"
+         ; "    for (int i = 0; i < numSamples; i++)"
+         ; "    {"
+         ; "        " ^ module_name ^ "_process(process_ctx, 0.0f);"
+         ; "    }"
+         ; "}"
+      ]
+   else
+      cat [
+         "void " ^ output ^ "AudioProcessor::prewarmDsp(int) {}"
+      ]
+   in
+   
    let midi_handler = if has_ctx then
       cat [
          "    // Process MIDI messages"
@@ -360,8 +417,6 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
    in
    (* For stereo output, we need to handle L/R channels properly *)
    let stereo_output = num_outputs >= 2 in
-   let mono_input = num_inputs <= 1 in
-   let input_expr = if mono_input then "inputChannel[j]" else "inputChannel[j]" in
    let process_loop = if stereo_output then
       cat [
          "    auto* leftChannel = buffer.getWritePointer(0);"
@@ -386,7 +441,53 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
          ; "    }"
       ]
    in
-   let _ = input_expr in (* silence unused warning *)
+   
+   (* Constructor - with or without APVTS *)
+   let constructor_body = if has_params then
+      cat [
+         output ^ "AudioProcessor::" ^ output ^ "AudioProcessor()"
+         ; "    : juce::AudioProcessor (BusesProperties()"
+         ; "                            .withInput  (" ^ a "Input" ^ ",  juce::AudioChannelSet::stereo(), true)"
+         ; "                            .withOutput (" ^ a "Output" ^ ", juce::AudioChannelSet::stereo(), true))"
+         ; "    , parameters(*this, nullptr, juce::Identifier(" ^ a output ^ "), createParameterLayout())"
+         ; "{"
+         ; "}"
+      ]
+   else
+      cat [
+         output ^ "AudioProcessor::" ^ output ^ "AudioProcessor()"
+         ; "    : juce::AudioProcessor (BusesProperties()"
+         ; "                            .withInput  (" ^ a "Input" ^ ",  juce::AudioChannelSet::stereo(), true)"
+         ; "                            .withOutput (" ^ a "Output" ^ ", juce::AudioChannelSet::stereo(), true))"
+         ; "{"
+         ; "}"
+      ]
+   in
+   
+   (* State save/restore - use APVTS if available *)
+   let state_funcs = if has_params then
+      cat [
+         "void " ^ output ^ "AudioProcessor::getStateInformation (juce::MemoryBlock& destData)"
+         ; "{"
+         ; "    auto state = parameters.copyState();"
+         ; "    std::unique_ptr<juce::XmlElement> xml(state.createXml());"
+         ; "    copyXmlToBinary(*xml, destData);"
+         ; "}"
+         ; ""
+         ; "void " ^ output ^ "AudioProcessor::setStateInformation (const void* data, int sizeInBytes)"
+         ; "{"
+         ; "    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));"
+         ; "    if (xml != nullptr && xml->hasTagName(parameters.state.getType()))"
+         ; "        parameters.replaceState(juce::ValueTree::fromXml(*xml));"
+         ; "}"
+      ]
+   else
+      cat [
+         "void " ^ output ^ "AudioProcessor::getStateInformation (juce::MemoryBlock&) {}"
+         ; "void " ^ output ^ "AudioProcessor::setStateInformation (const void*, int) {}"
+      ]
+   in
+   
    cat
       [ "#include " ^ a "PluginProcessor.h"
       ; ""
@@ -400,15 +501,13 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       ; "    int32_t fix_samplerate() { return (int32_t)(vult_sample_rate * 65536.0); }"
       ; "}"
       ; ""
+      ; param_layout_func
+      ; ""
       ; init_dsp_func
       ; ""
-      ; output ^ "AudioProcessor::" ^ output ^ "AudioProcessor()"
-      ; "    : juce::AudioProcessor (BusesProperties()"
-      ; "                            .withInput  (" ^ a "Input" ^ ",  juce::AudioChannelSet::stereo(), true)"
-      ; "                            .withOutput (" ^ a "Output" ^ ", juce::AudioChannelSet::stereo(), true))"
-      ; "{"
-      ; "    // DSP initialized in prepareToPlay when sample rate is known"
-      ; "}"
+      ; prewarm_func
+      ; ""
+      ; constructor_body
       ; ""
       ; output ^ "AudioProcessor::~" ^ output ^ "AudioProcessor() {}"
       ; ""
@@ -456,6 +555,8 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       ; "    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)"
       ; "        buffer.clear (i, 0, buffer.getNumSamples());"
       ; ""
+      ; param_sync
+      ; ""
       ; midi_handler
       ; ""
       ; process_loop
@@ -464,8 +565,7 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       ; "bool " ^ output ^ "AudioProcessor::hasEditor() const { return false; }"
       ; "juce::AudioProcessorEditor* " ^ output ^ "AudioProcessor::createEditor() { return nullptr; }"
       ; ""
-      ; "void " ^ output ^ "AudioProcessor::getStateInformation (juce::MemoryBlock&) {}"
-      ; "void " ^ output ^ "AudioProcessor::setStateInformation (const void*, int) {}"
+      ; state_funcs
       ; ""
       ; "juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()"
       ; "{"
