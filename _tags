@@ -7,7 +7,7 @@
 
 # Link libraries and ppx common for all targets
 <**/*.ml> : package(containers), package(pla), package(ppx_deriving), package(ppx_deriving.std), package(pla.ppx), package(result)
-# juceData.ml has no pla templates
+# juceData.ml uses string concatenation, not pla templates
 <src/generators/templates/juceData.ml> : -package(pla.ppx)
 <**/*.byte> or <**/*.d.byte> or <**/*.native> : package(containers), package(pla), package(ppx_deriving), package(result)
 
@@ -23,7 +23,7 @@
 true : bin_annot,custom,debug
 true : color(always)
 
-# Enables more warnings
-true : warn(+27+33-58-3)
+# Enables more warnings (disable 70 for missing mli)
+true : warn(+27+33-58-3-70)
 
 <examples> : not_hygienic

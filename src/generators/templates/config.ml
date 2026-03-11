@@ -34,6 +34,12 @@ type output =
    | OInt
    | OBool
 
+(** Represents a CC parameter extracted from controlChange function body *)
+type cc_param =
+   { cc_number : int      (** The MIDI CC number (e.g., 30, 74) *)
+   ; param_name : string  (** The parameter variable name (e.g., "volume", "cutoff") *)
+   }
+
 (** Represents the 'plugin' configuration *)
 type config =
    { module_name : string
@@ -43,6 +49,7 @@ type config =
    ; noteon_inputs : input list
    ; noteoff_inputs : input list
    ; controlchange_inputs : input list
+   ; cc_params : cc_param list  (** CC parameters extracted from controlChange body *)
    ; default_inputs : input list
    ; update_inputs : input list
    ; update_outputs : output list
@@ -75,6 +82,7 @@ let empty_conf module_name =
    ; noteon_inputs = []
    ; noteoff_inputs = []
    ; controlchange_inputs = []
+   ; cc_params = []
    ; default_inputs = []
    ; update_inputs = []
    ; update_outputs = []

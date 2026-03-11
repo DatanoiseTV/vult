@@ -136,6 +136,63 @@ module Configuration = struct
          Error.raiseError msg loc
    ;;
 
+   (** Gets the last name from an identifier (handles qualified names) *)
+   let getLastName (id : Id.t) : string option =
+      match List.rev id with
+      | name :: _ -> Some name
+      | [] -> None
+   ;;
+
+   (** Extracts the parameter name from an assignment in an if body.
+       Handles patterns like: param = value/127.0 or param = expr *)
+   let extractParamName (body : stmt) : string option =
+      match body with
+      (* Direct assignment: param = ... *)
+      | StmtBind (LId (id, _, _), _, _) -> getLastName id
+      (* Block with single assignment: { param = ...; } *)
+      | StmtBlock (_, [ StmtBind (LId (id, _, _), _, _) ], _) -> getLastName id
+      (* Block with multiple statements, take first assignment *)
+      | StmtBlock (_, stmts, _) ->
+         let rec find_bind = function
+            | [] -> None
+            | StmtBind (LId (id, _, _), _, _) :: _ -> getLastName id
+            | _ :: rest -> find_bind rest
+         in
+         find_bind stmts
+      | _ -> None
+   ;;
+
+   (** Extracts CC number and param name from an if statement.
+       Matches patterns like: if(control==30) param = ... or if(c==30) { param = ...; } *)
+   let extractCCFromIf (stmt : stmt) : Config.cc_param option =
+      match stmt with
+      (* if (control == N) body  or  if (c == N) body - handle any identifier length *)
+      | StmtIf (POp ("==", [ PId (_, _); PInt (cc_num, _) ], _), body, _, _)
+      | StmtIf (POp ("==", [ PInt (cc_num, _); PId (_, _) ], _), body, _, _) -> (
+         match extractParamName body with
+         | Some name -> Some { Config.cc_number = cc_num; param_name = name }
+         | None -> None)
+      | _ -> None
+   ;;
+
+   (** Recursively extracts all CC params from a statement (handles nested if/else chains) *)
+   let rec extractCCParams (stmt : stmt) : Config.cc_param list =
+      match stmt with
+      | StmtIf (_, then_body, else_body, _) -> (
+         let from_if = extractCCFromIf stmt in
+         let from_then = extractCCParams then_body in
+         let from_else =
+            match else_body with
+            | Some s -> extractCCParams s
+            | None -> []
+         in
+         match from_if with
+         | Some cc -> cc :: from_then @ from_else
+         | None -> from_then @ from_else)
+      | StmtBlock (_, stmts, _) -> List.concat_map extractCCParams stmts
+      | _ -> []
+   ;;
+
    (** This traverser checks the function declarations of the key functions to generate templates *)
    let stmt : ('a Env.t, stmt) Mapper.mapper_func =
       Mapper.make "Configuration.stmt"
@@ -157,10 +214,11 @@ module Configuration = struct
          let () = checkNoteOff attr.loc noteoff_inputs in
          let state' = Env.set state ({ conf with noteoff_inputs }, repl) in
          state', stmt
-      | StmtFun ([ cname; "controlChange" ], args, _, _, attr) when conf.module_name = cname ->
+      | StmtFun ([ cname; "controlChange" ], args, body, _, attr) when conf.module_name = cname ->
          let controlchange_inputs, _ = List.map (getType repl) args |> passData in
          let () = checkControlChange attr.loc controlchange_inputs in
-         let state' = Env.set state ({ conf with controlchange_inputs }, repl) in
+         let cc_params = extractCCParams body in
+         let state' = Env.set state ({ conf with controlchange_inputs; cc_params }, repl) in
          state', stmt
       | StmtFun ([ cname; "default" ], args, _, _, attr) when conf.module_name = cname ->
          let default_inputs, _ = List.map (getType repl) args |> passData in

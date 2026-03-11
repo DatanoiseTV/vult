@@ -66,9 +66,7 @@ coverage: compiler jscompiler
 	bisect-ppx-report send-to Coveralls --source-path _build
 
 version :
-	@echo "let version = \"" > src/version.ml
-	@git describe --tags --abbrev=0 --always >> src/version.ml
-	@echo "\"" >> src/version.ml
+	@printf 'let version = "%s"\n' "$$(git describe --tags --abbrev=0 --always 2>/dev/null || echo 'unknown')" > src/version.ml
 
 all: compiler js test web vultc_h jscompiler
 

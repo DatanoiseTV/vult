@@ -34,13 +34,9 @@ let rec removeContext = function
 
 let countInputs inputs = List.length (removeContext inputs)
 
-let getCCParamNames (config : config) : string list =
-   let rec loop = function
-      | [] -> []
-      | IContext :: t -> loop t
-      | IInt name :: t | IReal name :: t | IBool name :: t -> name :: loop t
-   in
-   loop config.controlchange_inputs
+(* Convert extracted CC params to (int * string) tuple list for juceData compatibility *)
+let getCCParams (config : config) : (int * string) list =
+   List.map (fun (p : cc_param) -> (p.cc_number, p.param_name)) config.cc_params
 ;;
 
 let get (params : params) (header_code : Pla.t) (impl_code : Pla.t) (tables_code : Pla.t)
@@ -53,46 +49,29 @@ let get (params : params) (header_code : Pla.t) (impl_code : Pla.t) (tables_code
    let num_outputs = List.length params.config.process_outputs in
 
    let has_ctx = List.exists (fun a -> a = IContext) params.config.process_inputs in
+   let cc_params = getCCParams params.config in
 
-   let inputName (i, acc) s =
+   (* Generate process call for stereo JUCE template - uses inputChannel[j] directly *)
+   let inputNameStereo (i, acc) s =
       match s with
       | IContext -> i, "process_ctx" :: acc
-      | _ -> i + 1, ("inputs[" ^ string_of_int i ^ "]") :: acc
+      | _ -> i + 1, "inputChannel[j]" :: acc  (* Use direct buffer access *)
    in
    let process_args =
-      List.fold_left inputName (0, []) params.config.process_inputs
+      List.fold_left inputNameStereo (0, []) params.config.process_inputs
       |> snd |> List.rev |> String.concat ", "
    in
    let process_call =
-      match params.config.process_outputs with
-      | [] -> module_name ^ "_process(" ^ process_args ^ ");"
-      | [ _ ] -> "outputs[0] = " ^ module_name ^ "_process(" ^ process_args ^ ");"
-      | o ->
-         module_name ^ "_process(" ^ process_args ^ ");\n"
-         ^ (List.mapi (fun i _ -> "            outputs[" ^ string_of_int i ^ "] = " ^ module_name ^ "_process_ret_" ^ string_of_int i ^ "(process_ctx);") o
-            |> String.concat "\n")
+      module_name ^ "_process(" ^ process_args ^ ");"
    in
 
-   let input_copies =
-      List.init num_inputs (fun i -> "inputs[" ^ string_of_int i ^ "] = buffer.getSample(channel, j);")
-      |> String.concat "\n            "
-   in
+   (* These are kept for compatibility but not used in stereo mode *)
+   let input_copies = "" in
+   let output_copies = "" in
 
-   let output_copies =
-      List.init num_outputs (fun i -> "buffer.setSample(channel, j, outputs[" ^ string_of_int i ^ "]);")
-      |> String.concat "\n            "
-   in
-
-   let vultin_h =
-      match FileIO.read "runtime/vultin.h" with
-      | Some s -> s
-      | None -> "/* vultin.h not found - copy from vult/runtime/ */"
-   in
-   let vultin_cpp =
-      match FileIO.read "runtime/vultin.cpp" with
-      | Some s -> s
-      | None -> "/* vultin.cpp not found - copy from vult/runtime/ */"
-   in
+   (* Use embedded vultin runtime from juceData - no file dependency *)
+   let vultin_h = JuceData.vultinHeaderStr in
+   let vultin_cpp = JuceData.vultinImplStr in
 
    let file_upper = String.uppercase_ascii output in
    let header_pla = [%pla {|
@@ -132,10 +111,7 @@ let get (params : params) (header_code : Pla.t) (impl_code : Pla.t) (tables_code
    ; Pla.string (JuceData.processorImplStr output cc_params num_inputs num_outputs
         module_name process_call input_copies output_copies "" has_ctx),
      FileKind.FullName (output ^ "/Source/PluginProcessor.cpp")
-   ; Pla.string (JuceData.editorHeaderStr output),
-     FileKind.NoFile
-   ; Pla.string (JuceData.editorImplStr output),
-     FileKind.NoFile
+   (* GUI-less mode: no editor files needed, host provides generic parameter view *)
    ; header_pla, FileKind.FullName (output ^ "/" ^ output ^ ".h")
    ; impl_pla, FileKind.FullName (output ^ "/" ^ output ^ ".cpp")
    ; tables_pla, FileKind.FullName (output ^ "/" ^ output ^ ".tables.h")
