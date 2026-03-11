@@ -322,10 +322,12 @@ let processorImplStr (output : string) (cc_params : (int * string) list) (num_in
    let has_params = List.length cc_params > 0 in
    
    (* Generate parameter layout function if we have CC params *)
+   (* Use ParameterID with version hint to satisfy JUCE 8 requirements *)
    let param_layout_func = if has_params then
-      let param_adds = List.map (fun (cc, name) ->
+      let param_adds = List.mapi (fun idx (cc, name) ->
          "        layout.add(std::make_unique<juce::AudioParameterFloat>(" ^
-         a ("cc" ^ string_of_int cc) ^ ", " ^ a name ^ ", 0.0f, 1.0f, 0.5f));"
+         "juce::ParameterID(" ^ a ("cc" ^ string_of_int cc) ^ ", 1), " ^
+         a name ^ ", juce::NormalisableRange<float>(0.0f, 1.0f), 0.5f));"
       ) cc_params |> cat in
       cat [
          "juce::AudioProcessorValueTreeState::ParameterLayout " ^ output ^ "AudioProcessor::createParameterLayout()"
