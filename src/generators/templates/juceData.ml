@@ -310,10 +310,14 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
    (module_name : string) (process_call : string) (_input_gets : string) (_output_sets : string)
    (_impl_code_str : string) (has_ctx : bool) : string =
    (* DSP init helper function - called from prepareToPlay *)
+   (* IMPORTANT: memset to zero first because Vult-generated init functions
+      don't initialize delay line arrays, leaving garbage in memory *)
    let init_dsp_func = if has_ctx then
       cat [
          "void " ^ output ^ "AudioProcessor::initDsp()"
          ; "{"
+         ; "    // Zero the entire context first - Vult init doesn't clear delay buffers"
+         ; "    std::memset(&process_ctx, 0, sizeof(process_ctx));"
          ; "    " ^ module_name ^ "_process_init(process_ctx);"
          ; "    " ^ module_name ^ "_default(process_ctx);"
          ; "    dspInitialized = true;"
@@ -381,6 +385,7 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
    cat
       [ "#include " ^ a "PluginProcessor.h"
       ; ""
+      ; "#include <cstring>"
       ; "#include " ^ a ("../" ^ output ^ ".h")
       ; "#include " ^ a ("../" ^ output ^ ".tables.h")
       ; ""
