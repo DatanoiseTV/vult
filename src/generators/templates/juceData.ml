@@ -316,10 +316,14 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       cat [
          "void " ^ output ^ "AudioProcessor::initDsp()"
          ; "{"
+         ; "    DBG(\"[VULT] initDsp called, sample rate = \" << vult_sample_rate);"
          ; "    // Zero the entire context first - Vult init doesn't clear delay buffers"
          ; "    std::memset(&process_ctx, 0, sizeof(process_ctx));"
+         ; "    DBG(\"[VULT] memset done, ctx size = \" << sizeof(process_ctx));"
          ; "    " ^ module_name ^ "_process_init(process_ctx);"
+         ; "    DBG(\"[VULT] process_init done\");"
          ; "    " ^ module_name ^ "_default(process_ctx);"
+         ; "    DBG(\"[VULT] default done, vol = \" << process_ctx.vol);"
          ; "    dspInitialized = true;"
          ; "}"
       ]
@@ -327,6 +331,7 @@ let processorImplStr (output : string) (_cc_params : (int * string) list) (num_i
       cat [
          "void " ^ output ^ "AudioProcessor::initDsp()"
          ; "{"
+         ; "    DBG(\"[VULT] initDsp called (no ctx)\");"
          ; "    dspInitialized = true;"
          ; "}"
       ]
